@@ -3,13 +3,13 @@ import re
 from typing import List, Dict, Any
 from src.core.llm_provider import LLMProvider
 from src.telemetry.logger import logger
+from src.telemetry.metrics import tracker
 from pathlib import Path
 
 
 class ReActAgent:
     """
-    SKELETON: A ReAct-style Agent that follows the Thought-Action-Observation loop.
-    Students should implement the core loop logic and tool execution.
+    A ReAct-style Agent that follows the Thought-Action-Observation loop.
     """
 
     def __init__(
@@ -23,65 +23,47 @@ class ReActAgent:
         self.max_steps = max_steps
         self.history = []
 
-    def get_system_prompt(self, user_input: str) -> str:
-        """
-        TODO: Implement the system prompt that instructs the agent to follow ReAct.
-        Should include:
-        1.  Available tools and their descriptions.
-        2.  Format instructions: Thought, Action, Observation.
-        """
+    def get_system_prompt(self) -> str:
+        """Load the prompt template with tools filled in (no user_input yet)."""
         tool_descriptions = "\n".join(
             [f"- {t['name']}: {t['description']}" for t in self.tools]
         )
-        tools_list = [t["name"] for t in self.tools]
-
-        return (
-            Path("src/prompts/ReAct.v2.txt")
+        tools_list = ", ".join(t["name"] for t in self.tools)
+        raw = (
+            Path(os.environ.get("REACT_PROMPT", "src/prompts/ReAct.v2.txt"))
             .read_text()
-            .format(
-                tools=tool_descriptions,
-                # tools_list=tools_list,
-                user_input=user_input,
-            )
         )
+        # Support both v1 ({tools_list}) and v2 ({tools}) placeholders
+        return raw.format(tools=tool_descriptions, tools_list=tools_list)
 
     def run(self, user_input: str) -> str:
-        """
-        TODO: Implement the ReAct loop logic.
-        1. Generate Thought + Action.
-        2. Parse Action and execute Tool.
-        3. Append Observation to prompt and repeat until Final Answer.
-        """
+        """Run the ReAct loop for a single query."""
         logger.log_event(
             "AGENT_START", {"input": user_input, "model": self.llm.model_name}
         )
 
-        current_prompt = self.get_system_prompt(user_input)
-        print(current_prompt)
+        template = self.get_system_prompt()
+        current_prompt = template + f"\nQuery: {user_input}\n"
         steps = 0
-
-        total_tokens: int | None = None
-        latency_ms = 0
-        final_answer: str = (
+        final_answer = (
             "Agent failed to solve the problem within the iteration limit."
         )
 
         while steps < self.max_steps:
             steps += 1
+            print(f"--- Iteration {steps} ---")
 
-            logger.info(f"--- Iteration {steps} ---")
             response = self.llm.generate(current_prompt)
             llm_response = response["content"]
+            print(llm_response)
 
-            if response["usage"]["total_tokens"]:
-                if total_tokens is None:
-                    total_tokens = 0
-                total_tokens += response["usage"]["total_tokens"]
-
-            latency_ms += response["latency_ms"]
-
-            current_prompt += f"Observation: {llm_response}\n"
-            logger.info(llm_response)
+            # Track metrics via PerformanceTracker
+            tracker.track_request(
+                provider=type(self.llm).__name__,
+                model=self.llm.model_name,
+                usage=response.get("usage", {}),
+                latency_ms=response.get("latency_ms", 0),
+            )
 
             if "Final Answer:" in llm_response:
                 final_answer = llm_response.split("Final Answer:")[-1].strip()
@@ -93,9 +75,8 @@ class ReActAgent:
             )
 
             if not action_match or not action_input_match:
-                error_msg = "Observation: Error - Could not parse Action and Action Input. Please use the strict format."
+                error_msg = "Error - Could not parse Action and Action Input. Please use the strict format."
                 current_prompt += error_msg + "\n"
-                logger.error(error_msg)
                 continue
 
             action = action_match.group(1).strip()
@@ -103,20 +84,15 @@ class ReActAgent:
 
             observation = self._execute_tool(action, action_input)
 
-            current_prompt += observation + "\n"
-            logger.info(observation + "\n")
+            current_prompt += llm_response + "\nObservation: " + observation + "\n"
 
         logger.log_event(
             "AGENT_END",
-            {"steps": steps, "latency_ms": latency_ms, "total_tokens": total_tokens},
+            {"steps": steps, "final_answer": final_answer[:200]},
         )
         return final_answer
 
     def _execute_tool(self, tool_name: str, args: str) -> str:
-        """
-        Helper method to execute tools by name.
-        """
-
         for tool in self.tools:
             if tool["name"] == tool_name:
                 return tool["func"](args)
