@@ -1,6 +1,8 @@
 import time
-from typing import Dict, Any, Optional, Generator
+from typing import Any, Dict, Generator, Optional
+
 from openai import OpenAI
+
 from src.core.llm_provider import LLMProvider
 
 
@@ -32,6 +34,7 @@ class OpenAIProvider(LLMProvider):
             model=self.model_name,
             messages=messages,
             extra_body=self.extra_body,
+            max_tokens=500,
         )
 
         end_time = time.time()
